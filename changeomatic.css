@@ -1,0 +1,85 @@
+.changeomatic .photos {overflow:hidden;position:relative;width:100%; background-color:black;}
+.changeomatic img {height:auto; max-height: 519px;}
+.changeomatic {position: relative;
+  min-height: 519px;
+}
+.changeomatic .notice { 
+  position: absolute; 
+  left: 0; 
+  top: 0; 
+  width: 100%; 
+  height: 519px; 
+  line-height: 519px;
+  background-color: black; 
+  color:white; 
+  opacity: 0.8; 
+  text-align: center; 
+  z-index:1000;
+}
+.changeomatic .next, .changeomatic .prev {
+  cursor: pointer;
+  position: absolute; 
+  top: 50%; 
+  margin-top: -0.7em; 
+  font-size: 40pt; 
+  font-family: Verdana; 
+  color:white; 
+  padding:0.5em; 
+  text-decoration:none; 
+  opacity: 0.8;
+  z-index:1000;
+}
+.changeomatic .next:hover, 
+.changeomatic .prev:hover {opacity: 1;}
+.changeomatic .next { right: 0px;}
+.changeomatic .prev { left: 0px;}
+.changeomatic .caption {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  color: white;
+  overflow: hidden;
+  width: 100%;
+  z-index: 1000;
+}
+.changeomatic .caption .cycle-caption {
+  padding: 1em;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  position: relative;
+}
+.changeomatic .caption .bg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color:black;
+  opacity: 0.5;
+  filter: alpha(opacity=50);
+  z-index: 0;
+}
+.cycle-paused:after {
+    content: 'Paused'; 
+    color: white; 
+    background: black; padding: 10px;
+    z-index: 500; 
+    position: absolute; 
+    top: 20px; 
+    right: 20px;
+    opacity: .5; 
+    filter: alpha(opacity=50);
+}
+.cycle-pager {
+  word-wrap: break-word;
+  text-align: center;
+}
+.cycle-pager .item {
+  background-color: #ccc;
+  margin-left: 2px;
+  text-decoration: none;
+}
+.cycle-pager .item:first-child {margin-left:0;}
+.cycle-pager .item:hover { background-color: black; }
+.cycle-pager .item.cycle-pager-active { background-color: #666; }
