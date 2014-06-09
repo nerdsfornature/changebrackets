@@ -98,6 +98,23 @@ It can also read data from a Google Spreadsheet made by fireslurp, which is
 one way of getting around the Twitter thing, though doing so requires that you
 [publish your Google Spreadsheet](https://support.google.com/docs/answer/37579).
 
+Your spreadsheet must meet the following requirements:
+
+1. If there's more than one sheet, the one containing the photo data must be named `Data`
+1. It must have columns just like those made by `fireslurp.rb`, which means it has the following columns as the first row, in this order:
+  1. provider
+  1. tag
+  1. datetime
+  1. username
+  1. usable_tag
+  1. image_url
+  1. url
+  1. image_url_s
+  1. image_url_m
+  1. license
+  1. title
+
+
 ### REQUIREMENTS
 * [jQuery](http://jquery.com/)
 * [cycle2](http://jquery.malsup.com/cycle2/)

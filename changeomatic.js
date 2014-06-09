@@ -113,8 +113,9 @@ $(function() {
       Tabletop.init({
         key: options.googleSpreadsheetId,
         callback: function(data, tabletop) {
+          var sheet = tabletop.sheets('Data') || tabletop.sheets(tabletop.model_names[0])
           var photos = []
-          $.each(data, function(i, row) {
+          $.each(sheet.all(), function(i, row) {
             // provides us some control over which photos to use
             if (tag != row.usabletag) return
             var src = row.imageurl
@@ -134,8 +135,7 @@ $(function() {
           })
           $(elt).data('photos', photos)
           finishedLoad()
-        },
-        simpleSheet: true
+        }
       })
     }
 
