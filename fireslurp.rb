@@ -78,6 +78,7 @@ INSTAGRAM_KEY         = OPTS[:instagram_key]          || config['instagram_key']
 GOOGLE_EMAIL          = OPTS[:google_email]           || config['google_email']
 GOOGLE_PASSWORD       = OPTS[:google_password]        || config['google_password']
 GOOGLE_SPREADSHEET_ID = OPTS[:google_spreadsheet_id]  || config['google_spreadsheet_id']
+AUTO_APPROVE          = OPTS[:auto_approve]           || config['auto_approve']
 ###############################################################
 
 HEADERS = %w(provider tag datetime username usable_tag image_url url image_url_s image_url_m license title)
@@ -257,7 +258,7 @@ def write_to_google(providers, tags)
         row = (urls.index(photo.url.to_s) || ws.num_rows) + 1
         existing_usable_tag = ws[row,HEADERS.index('usable_tag')+1]
         usable_tag = existing_usable_tag
-        usable_tag = tag if OPTS[:auto_approve] && existing_usable_tag.blank?
+        usable_tag = tag if AUTO_APPROVE && existing_usable_tag.blank?
         [
           provider_name, 
           tag, 

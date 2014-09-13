@@ -65,7 +65,7 @@ def download_images
   rows = ws.rows.select {|r| @tag == r[HEADERS.index('usable_tag')]}
   rows.each_with_index do |row,i|
     provider, row_tag, datetime, username, usable_tag, image_url, url, image_url_s, image_url_m, license, title = row
-    next unless @tag == row_tag
+    next unless @tag == usable_tag
     base = File.basename(image_url)
     ext = File.extname(image_url).split(':')[0]
     fname = "#{@tag}-#{datetime}-#{provider}-#{username}-#{base.split('.')[0]}#{ext}".gsub(/[^A-z0-9\-\_\.]+/, '_')
