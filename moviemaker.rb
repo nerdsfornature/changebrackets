@@ -29,6 +29,7 @@ EOS
     look for an internal variable.
   ".strip, :type => :string, :short => '-g'
   opt :timelapsing, "timelapsing_detailed command (could be full path to binary)", :type => :string, :default => "timelapsing_detailed"
+  opt :limit, "Limit the stitch to the first n files. Just for testing.", :type => :integer
 end
 
 config = if OPTS[:config] && File.exists?(OPTS[:config])
@@ -64,8 +65,13 @@ def download_images
   ws = session.spreadsheet_by_key(GOOGLE_SPREADSHEET_ID).worksheets[0]
   rows = ws.rows.select {|r| @tag == r[HEADERS.index('usable_tag')]}
   rows.each_with_index do |row,i|
+    next if OPTS.limit && OPTS.limit < i+1
     provider, row_tag, datetime, username, usable_tag, image_url, url, image_url_s, image_url_m, license, title = row
     next unless @tag == usable_tag
+    if image_url.empty?
+      puts "\timage_url blank, skipping..."
+      next
+    end
     base = File.basename(image_url)
     ext = File.extname(image_url).split(':')[0]
     fname = "#{@tag}-#{datetime}-#{provider}-#{username}-#{base.split('.')[0]}#{ext}".gsub(/[^A-z0-9\-\_\.]+/, '_')
@@ -101,7 +107,12 @@ end
 
 def create_movie
   puts "CREATING MOVIE" if OPTS[:debug]
-  system_call "convert -delay 30 #{@work_path}/resized-fixed_* #{@work_path}/#{@tag}.gif"
+  prefix = if OPTS[:skip_alignment]
+    "resized-"
+  else
+    "resized-fixed_"
+  end
+  system_call "convert -delay 30 #{@work_path}/#{prefix}* #{@work_path}/#{@tag}.gif"
 end
 
 download_images unless OPTS[:skip_download]
