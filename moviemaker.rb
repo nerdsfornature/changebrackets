@@ -10,8 +10,11 @@ Download image files listed in fireslurp's Google Spreadsheet and make a
 timelapse movie.
 
 Usage:
-
+  # make a movie for tag morganfire01 using a config file
   bundle exec ruby moviemaker.rb -c fireslurp.yaml morganfire01
+
+  # Do the same with a larger width and writing to a directory
+  bundle exec ruby moviemaker.rb -c fireslurp.yaml morganfire01 -f t1 -w 1024
 
 where [options] are:
 EOS
@@ -55,8 +58,32 @@ end
 FileUtils.mkdir_p @work_path, :mode => 0755
 
 def system_call(cmd)
+  cmd = cmd.gsub(/\s+/m, ' ')
   puts "Running #{cmd}" if OPTS[:debug]
   system cmd
+end
+
+
+
+# Lifted from activesupport/lib/active_support/core_ext/array/grouping.rb, line 20
+class Array
+  def in_groups_of(number, fill_with = nil)
+    if fill_with == false
+      collection = self
+    else
+      # size % number gives how many extra we have;
+      # subtracting from number gives how many to add;
+      # modulo number ensures we don't add group of just fill.
+      padding = (number - size % number) % number
+      collection = dup.concat(Array.new(padding, fill_with))
+    end
+
+    if block_given?
+      collection.each_slice(number) { |slice| yield(slice) }
+    else
+      collection.each_slice(number).to_a
+    end
+  end
 end
 
 def download_images
@@ -74,7 +101,7 @@ def download_images
     end
     base = File.basename(image_url)
     ext = File.extname(image_url).split(':')[0]
-    fname = "#{@tag}-#{datetime}-#{provider}-#{username}-#{base.split('.')[0]}#{ext}".gsub(/[^A-z0-9\-\_\.]+/, '_')
+    fname = "#{@tag}+#{datetime}+#{provider}+#{username}+#{base.split('.')[0]}#{ext}".gsub(/[^A-z0-9\+\-\_\.]+/, '_')
     path = File.join(@work_path, fname)
     puts "#{i+1} of #{rows.size}, writing\n\t#{image_url} to \n\t#{path}"
     begin
@@ -93,30 +120,86 @@ end
 
 def resize_images(options = {})
   puts "RESIZING RAW IMAGES"  if OPTS[:debug]
-  prefix = "#{options[:prefix] || "#{@tag}-"}*"
+  prefix = "#{options[:prefix] || "#{@tag}+"}*"
+  system_call "rm #{@work_path}/resized+*"
   Dir.glob(File.join(@work_path, prefix)).each do |path|
     basename = File.basename(path)
-    system_call "convert #{path} -resize #{OPTS[:width]} #{@work_path}/resized-#{basename}"
+    system_call "convert #{path} -resize #{OPTS[:width]} #{@work_path}/resized+#{basename}"
   end
 end
 
 def align_images
   puts "ALIGNING" if OPTS[:debug]
-  system_call "cd #{@work_path} && #{OPTS[:timelapsing]} resized-*"
+  window = 70
+  paths = Dir.glob(File.join(@work_path, "resized+*")).map{|p| p.split('/').last}
+  (paths.size / 10.0).ceil.times do |i|
+    puts "WINDOW #{i}"
+    batch_paths = paths[i*window, window] || []
+    puts "Batch paths:"
+    batch_paths.each do |p|
+      puts "\t#{p}"
+    end
+    all_paths = batch_paths
+    system_call "cd #{@work_path} && #{OPTS[:timelapsing]} #{all_paths.join(' ')}" if all_paths.compact.size > 0
+  end
+end
+
+def create_movie_images
+  puts "CREATING MOVIE FRAMES" if OPTS[:debug]
+  prefix = if OPTS[:skip_alignment]
+    "resized+"
+  else
+    "resized+fixed_"
+  end
+  dates, paths = [], []
+  paths_by_date = {}
+  Dir.glob(File.join(@work_path, "#{prefix}*")).each do |path|
+    paths << path
+    date = path[/\d{4}-\d{2}-\d{2}/, 0]
+    dates << date
+    paths_by_date[date] ||= []
+    paths_by_date[date] << path
+  end
+  dates = dates.compact.sort
+  start = DateTime.parse(dates.min).to_date
+  stop = DateTime.parse(dates.max).to_date + 10 # pad with 10 days
+  src_path = nil
+  (start..stop).each do |date|
+    src_path = if paths_by_date[date.to_s] && (path = paths_by_date[date.to_s].first)
+      path
+    else
+      src_path
+    end
+    next unless src_path
+    dest_path = File.join(File.dirname(src_path), "movie+#{date}+#{File.basename(src_path)}")
+    pieces = File.basename(src_path).split('+')
+    provider, photographer = pieces[-3], pieces[-2].to_s.gsub(/_/, ' ')
+    inset = OPTS[:width] * 0.02
+    system_call <<-BASH
+      convert #{src_path} \
+        -gravity northwest -background black -extent #{OPTS[:width]}x#{OPTS[:width]} \
+        -font Helvetica-Bold -pointsize #{inset} -fill white -gravity northwest -annotate +#{inset}+#{inset} '#{date}' \
+        -font Helvetica      -pointsize #{inset} -fill white -gravity north     -annotate +#{inset}+#{inset} 'Photo (c) #{photographer}' \
+        -font Helvetica      -pointsize #{inset} -fill white -gravity northeast -annotate +#{inset}+#{inset} 'Via #{provider}' \
+        #{dest_path}
+    BASH
+  end
 end
 
 def create_movie
   puts "CREATING MOVIE" if OPTS[:debug]
-  prefix = if OPTS[:skip_alignment]
-    "resized-"
-  else
-    "resized-fixed_"
-  end
-  system_call "convert -delay 30 #{@work_path}/#{prefix}* #{@work_path}/#{@tag}.gif"
+  system_call <<-BASH
+    mencoder mf://#{File.join(@work_path, "movie+*")} \
+      -mf w=#{OPTS[:width]}:h=#{OPTS[:width]}:fps=15 \
+      -ovc x264 \
+      -oac copy \
+      -o #{File.join(@work_path, "#{@tag}.avi")}
+  BASH
 end
 
 download_images unless OPTS[:skip_download]
 resize_images
 align_images unless OPTS[:skip_alignment]
 resize_images(:prefix => "fixed_")
+create_movie_images
 create_movie
