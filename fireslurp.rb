@@ -3,10 +3,12 @@ require 'twitter'
 require 'pp'
 require 'active_support/inflector'
 require 'active_support/core_ext/object'
+require 'active_support/json'
 require 'ostruct'
 require 'flickraw'
 require 'instagram'
 require 'csv'
+require 'googleauth'
 require 'google_drive'
 require 'trollop'
 require 'yaml'
@@ -32,8 +34,7 @@ Usage:
   bundle exec ruby fireslurp.rb \
     --twitter-key=xxx \
     --twitter-secret=yyy \
-    --google-email=your.email@gmail.com \
-    --google-password=worstpasswordevar \
+    --google-application-credentials=/path/to/your/key.json \
     --google-spreadsheet-id=1234abcd \
     morganfire01 morganfire02
 
@@ -53,8 +54,7 @@ EOS
   opt :flickr_key, "Flickr API key", :type => :string
   opt :flickr_secret, "Flickr API secret", :type => :string
   opt :instagram_key, "Instagram API key", :type => :string
-  opt :google_email, "Google email address, used to add data to a Google spreadsheet", :type => :string
-  opt :google_password, "Google account password", :type => :string
+  opt :google_application_credentials, "Path to Google JSON key", type: :string
   opt :google_spreadsheet_id, "
     Write data to a Google Spreadsheet instead of CSV. The value should be the
     Google Spreadhseet ID. If it's blank and the flag is used, the script will
@@ -69,24 +69,24 @@ else
 end
 
 ## CONFIG ###############################################
-TAGS                  = ARGV
-TWITTER_KEY           = OPTS[:twitter_key]            || config['twitter_key']
-TWITTER_SECRET        = OPTS[:twitter_secret]         || config['twitter_secret']
-FLICKR_KEY            = OPTS[:flickr_key]             || config['flickr_key']
-FLICKR_SECRET         = OPTS[:flickr_secret]          || config['flickr_secret']
-INSTAGRAM_KEY         = OPTS[:instagram_key]          || config['instagram_key']
-GOOGLE_EMAIL          = OPTS[:google_email]           || config['google_email']
-GOOGLE_PASSWORD       = OPTS[:google_password]        || config['google_password']
-GOOGLE_SPREADSHEET_ID = OPTS[:google_spreadsheet_id]  || config['google_spreadsheet_id']
+TAGS                            = ARGV
+TWITTER_KEY                     = OPTS[:twitter_key]                      || config['twitter_key']
+TWITTER_SECRET                  = OPTS[:twitter_secret]                   || config['twitter_secret']
+FLICKR_KEY                      = OPTS[:flickr_key]                       || config['flickr_key']
+FLICKR_SECRET                   = OPTS[:flickr_secret]                    || config['flickr_secret']
+INSTAGRAM_KEY                   = OPTS[:instagram_key]                    || config['instagram_key']
+GOOGLE_APPLICATION_CREDENTIALS  = OPTS[:google_application_credentials]   || config['google_application_credentials']
+GOOGLE_SPREADSHEET_ID           = OPTS[:google_spreadsheet_id]            || config['google_spreadsheet_id']
+AUTO_APPROVE                    = OPTS[:auto_approve]                     || config['auto_approve']
 ###############################################################
 
 HEADERS = %w(provider tag datetime username usable_tag image_url url image_url_s image_url_m license title)
 
 Trollop::die "you must specify at least one tag" if ARGV.empty?
 Trollop::die "you must specify at least one API key" if [TWITTER_KEY, FLICKR_KEY, INSTAGRAM_KEY].compact.reject(&:blank?).blank?
-num_google_opts = [GOOGLE_EMAIL, GOOGLE_PASSWORD, GOOGLE_SPREADSHEET_ID].compact.reject(&:blank?).size
-if num_google_opts > 0 && num_google_opts < 3
-  Trollop::die "you must specify a Google email, password, and spreadsheet ID if you specify any of those options"
+num_google_opts = [GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_SPREADSHEET_ID].compact.reject(&:blank?).size
+if num_google_opts > 0 && num_google_opts < 2
+  Trollop::die "you must specify a Google application credentials and spreadsheet ID if you specify any of those options"
 end
 
 class TwitterProvider
@@ -230,8 +230,52 @@ def write_to_csv(providers, tags)
   csv.close unless OPTS[:debug]
 end
 
+def google_access_token
+  scopes =  [
+    "https://www.googleapis.com/auth/drive",
+    "https://spreadsheets.google.com/feeds/"
+  ]
+  auth = begin
+    Google::Auth.get_application_default(scopes)
+  rescue RuntimeError => e
+    raise e unless e.message =~ /Could not load the default credentials/
+    # Google JSON key was not specified as an ENV variable, so let's try to set it using the options
+    ENV['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS
+    begin
+      Google::Auth.get_application_default(scopes)
+    rescue RuntimeError => e
+      raise e unless e.message =~ /Could not load the default credentials/
+      if ENV['GOOGLE_APPLICATION_CREDENTIALS'].nil?
+        puts <<-EOT
+
+          Could not find Google credentials or they're not working. Set
+          ENV['GOOGLE_APPLICATION_CREDENTIALS'] to the path to your JSON key
+          file, set google_application_credentials to the same in your config
+          YAML, or pass in --google-application-
+          credentials=/path/to/credentials.json
+
+        EOT
+      else
+        puts "Google credentials at #{ENV['GOOGLE_APPLICATION_CREDENTIALS']} don't seem to be working."
+      end
+      exit(0)
+    end
+  end
+  auth.fetch_access_token!
+  auth.access_token
+end
+
 def write_to_google(providers, tags)
-  session = GoogleDrive.login(GOOGLE_EMAIL, GOOGLE_PASSWORD)
+  session = begin
+    GoogleDrive.login_with_oauth(google_access_token)
+  rescue Faraday::SSLError
+    # Sometimes Faraday barfs if it can't find its certs. This will force it to do so in OS X, at least.
+    # https://github.com/google/google-api-ruby-client/issues/253#issuecomment-128747637
+    cert_path = Gem.loaded_specs['google-api-client'].full_gem_path+'/lib/cacerts.pem'
+    ENV['SSL_CERT_FILE'] = cert_path
+    GoogleDrive.login_with_oauth(google_access_token)
+  end
+
   ws = session.spreadsheet_by_key(GOOGLE_SPREADSHEET_ID).worksheets[0]
   if ws.rows[0].nil? || ws.rows[0].size == 0
     HEADERS.each_with_index do |header,i|
@@ -257,7 +301,7 @@ def write_to_google(providers, tags)
         row = (urls.index(photo.url.to_s) || ws.num_rows) + 1
         existing_usable_tag = ws[row,HEADERS.index('usable_tag')+1]
         usable_tag = existing_usable_tag
-        usable_tag = tag if OPTS[:auto_approve] && existing_usable_tag.blank?
+        usable_tag = tag if AUTO_APPROVE && existing_usable_tag.blank?
         [
           provider_name, 
           tag, 
@@ -283,7 +327,7 @@ providers = []
 providers << TwitterProvider if TWITTER_KEY
 providers << FlickrProvider if FLICKR_KEY
 providers << InstagramProvider if INSTAGRAM_KEY
-if GOOGLE_EMAIL && GOOGLE_PASSWORD && GOOGLE_SPREADSHEET_ID
+if GOOGLE_APPLICATION_CREDENTIALS && GOOGLE_SPREADSHEET_ID
   write_to_google(providers, TAGS)
 else
   write_to_csv(providers, TAGS)

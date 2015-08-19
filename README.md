@@ -41,8 +41,7 @@ bundle exec ruby fireslurp.rb --instagram-key=xxx morganfire01 morganfire02
 bundle exec ruby fireslurp.rb \
   --twitter-key=xxx \
   --twitter-secret=yyy \
-  --google-email=your.email@gmail.com \
-  --google-password=worstpasswordevar \
+  --google-application-credentials=/path/to/your/key.json \
   --google-spreadsheet-id=1234abcd \
   morganfire01 morganfire02
 
@@ -55,9 +54,13 @@ The last option using a config file is probably the easiest way to go.
 Spreadsheet ID is just the unique part of your Google Spreadsheet URL, so if
 the URL when you're editing it looks like 
 `https://docs.google.com/spreadsheets/d/1HF1fEF4j69Ny6ng9TZYNLYnnRb4J6mPCqmckyOrsomI/edit`, 
-then the ID is `1HF1fEF4j69Ny6ng9TZYNLYnnRb4J6mPCqmckyOrsomI`. Note that to
-use a Google Spreadsheet, the user you provide the email and password for must
-having editing privileges.
+then the ID is `1HF1fEF4j69Ny6ng9TZYNLYnnRb4J6mPCqmckyOrsomI`. Now here's the tricky part: in order to
+write to a Google Spreadsheet, you'll need to do these annoying things:
+
+1. Set up a project in the [Google Developer Console](https://console.developers.google.com) and create a Service Account. Painful (but functional) instructions at https://developers.google.com/identity/protocols/OAuth2ServiceAccount. You don't need to delegate domain-wide authority, but you do need to hold on to that JSON key file you generate as a part of creating the service account
+1. In the [Google Developer Console](https://console.developers.google.com), enable the Drive API.
+1. Share your spreadsheet with the service account's email address and grant it editing permissions.
+1. Specify the path to that JSON key file you downloaded as an ENV variable named `GOOGLE_APPLICATION_CREDENTIALS`, in your configureation YAML, or using `--google-application-credentials`
 
 Note that this script only retrieves info about *recent* photos, so it should
 be run at least daily, more often if your tags get a lot of use.
