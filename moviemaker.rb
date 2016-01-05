@@ -3,6 +3,8 @@ require 'google_drive'
 require 'open-uri'
 require 'trollop'
 require 'yaml'
+require 'active_support/json'
+require 'googleauth'
 
 OPTS = Trollop::options do
     banner <<-EOS
@@ -24,8 +26,7 @@ EOS
   opt :width, "Width of the movie", :type => :integer, :short => "-w", :default => 500
   opt :skip_download, "Skip the downloads and assume files are already in the work path", :type => :boolean, :default => false
   opt :skip_alignment, "Skip the alignment and assume files are already in the work path", :type => :boolean, :default => false
-  opt :google_email, "Google email address, used to add data to a Google spreadsheet", :type => :string
-  opt :google_password, "Google account password", :type => :string
+  opt :google_application_credentials, "Path to Google JSON key", type: :string
   opt :google_spreadsheet_id, "
     Write data to a Google Spreadsheet instead of CSV. The value should be the
     Google Spreadhseet ID. If it's blank and the flag is used, the script will
@@ -42,8 +43,7 @@ else
 end
 
 ## CONFIG ###############################################
-GOOGLE_EMAIL          = OPTS[:google_email]           || config['google_email']
-GOOGLE_PASSWORD       = OPTS[:google_password]        || config['google_password']
+GOOGLE_APPLICATION_CREDENTIALS  = OPTS[:google_application_credentials]   || config['google_application_credentials']
 GOOGLE_SPREADSHEET_ID = OPTS[:google_spreadsheet_id]  || config['google_spreadsheet_id']
 ###############################################################
 
@@ -88,7 +88,16 @@ end
 
 def download_images
   puts "DOWNLOADING IMAGES"  if OPTS[:debug]
-  session = GoogleDrive.login(GOOGLE_EMAIL, GOOGLE_PASSWORD)
+  session = begin
+    GoogleDrive.login_with_oauth(google_access_token)
+  rescue Faraday::SSLError
+    # Sometimes Faraday barfs if it can't find its certs. This will force it to do so in OS X, at least.
+    # https://github.com/google/google-api-ruby-client/issues/253#issuecomment-128747637
+    cert_path = Gem.loaded_specs['google-api-client'].full_gem_path+'/lib/cacerts.pem'
+    ENV['SSL_CERT_FILE'] = cert_path
+    GoogleDrive.login_with_oauth(google_access_token)
+  end
+
   ws = session.spreadsheet_by_key(GOOGLE_SPREADSHEET_ID).worksheets[0]
   rows = ws.rows.select {|r| @tag == r[HEADERS.index('usable_tag')]}
   rows.each_with_index do |row,i|
@@ -116,6 +125,39 @@ def download_images
       end
     end
   end
+end
+
+def google_access_token
+  scopes =  [
+    "https://www.googleapis.com/auth/drive",
+    "https://spreadsheets.google.com/feeds/"
+  ]
+  auth = begin
+    Google::Auth.get_application_default(scopes)
+  rescue RuntimeError => e
+    raise e unless e.message =~ /Could not load the default credentials/
+    # Google JSON key was not specified as an ENV variable, so let's try to set it using the options
+    ENV['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS
+    begin
+      Google::Auth.get_application_default(scopes)
+    rescue RuntimeError => e
+      raise e unless e.message =~ /Could not load the default credentials/
+      if ENV['GOOGLE_APPLICATION_CREDENTIALS'].nil?
+        puts <<-EOT
+          Could not find Google credentials or they're not working. Set
+          ENV['GOOGLE_APPLICATION_CREDENTIALS'] to the path to your JSON key
+          file, set google_application_credentials to the same in your config
+          YAML, or pass in --google-application-
+          credentials=/path/to/credentials.json
+        EOT
+      else
+        puts "Google credentials at #{ENV['GOOGLE_APPLICATION_CREDENTIALS']} don't seem to be working."
+      end
+      exit(0)
+    end
+  end
+  auth.fetch_access_token!
+  auth.access_token
 end
 
 def resize_images(options = {})
