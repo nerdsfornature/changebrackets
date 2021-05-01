@@ -34,8 +34,6 @@ tags and stores them in local CSV files or a Google Spreadsheet. Run
 `ruby fireslurp.rb --help` to see all the options, but basic usage looks like this:
 
 ```bash
-# Save info about Instagram photos for two tags in a local CSV file
-bundle exec ruby fireslurp.rb --instagram-key=xxx morganfire01 morganfire02
 
 # Save info about Twitter photos for two tags to a Google Spreadsheet
 bundle exec ruby fireslurp.rb \
