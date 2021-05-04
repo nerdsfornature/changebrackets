@@ -81,11 +81,11 @@ AUTO_APPROVE                    = OPTS[:auto_approve]                     || con
 
 HEADERS = %w(provider tag datetime username usable_tag image_url url image_url_s image_url_m license title)
 
-Trollop::die "you must specify at least one tag" if ARGV.empty?
-Trollop::die "you must specify at least one API key" if [TWITTER_KEY, FLICKR_KEY].compact.reject(&:blank?).blank?
+Optimist::die "you must specify at least one tag" if ARGV.empty?
+Optimist::die "you must specify at least one API key" if [TWITTER_KEY, FLICKR_KEY].compact.reject(&:blank?).blank?
 num_google_opts = [GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_SPREADSHEET_ID].compact.reject(&:blank?).size
 if num_google_opts > 0 && num_google_opts < 2
-  Trollop::die "you must specify a Google application credentials and spreadsheet ID if you specify any of those options"
+  Optimist::die "you must specify a Google application credentials and spreadsheet ID if you specify any of those options"
 end
 
 class TwitterProvider

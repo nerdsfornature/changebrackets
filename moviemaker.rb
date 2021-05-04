@@ -1,10 +1,10 @@
 require 'rubygems'
 require 'google_drive'
 require 'open-uri'
-require 'trollop'
+require 'optimist'
 require 'yaml'
 
-OPTS = Trollop::options do
+OPTS = Optimist::options do
     banner <<-EOS
 Download image files listed in fireslurp's Google Spreadsheet and make a
 timelapse movie.
