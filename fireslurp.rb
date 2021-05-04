@@ -230,37 +230,20 @@ def google_access_token
   auth.access_token
 end
 
-def sheets_col( col )
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[HEADERS.index(col)]
-end
-
 def write_to_google(providers, tags)
-  sheets = Google::Apis::SheetsV4::SheetsService.new
-  sheets.authorization = google_access_token
-  ws = sheets.get_spreadsheet(GOOGLE_SPREADSHEET_ID).sheets[0]
-  ws_title = ws.properties.title
-  header = sheets.get_spreadsheet_values(GOOGLE_SPREADSHEET_ID, "#{ws_title}!1:1").values
+  ws = GoogleSpreadsheet.new(GOOGLE_SPREADSHEET_ID, 0)
+  header = ws[0]
   if !header || header[0].blank? || header.size == 0
-    header_range = "#{ws_title}!1:1"
-    unless OPTS[:debug]
-      sheets.update_spreadsheet_value(
-        GOOGLE_SPREADSHEET_ID,
-        header_range,
-        Google::Apis::SheetsV4::ValueRange.new(range: header_range, values: [HEADERS]),
-        value_input_option: 'USER_ENTERED'
-      )
-    end
+    ws[0] = HEADERS
   end
-  url_col_range = "#{ws_title}!#{sheets_col('url')}:#{sheets_col('url')}"
-  usable_tag_col_range = "#{ws_title}!#{sheets_col('usable_tag')}:#{sheets_col('usable_tag')}"
   providers.each do |provider|
     provider_name = provider.name.underscore.split('_').first.capitalize
     puts
     tags.each do |tag|
       provider.search(tag) do |photo|
         next unless photo
-        urls = sheets.get_spreadsheet_values(GOOGLE_SPREADSHEET_ID, url_col_range).values.flatten
-        usable_tags = sheets.get_spreadsheet_values(GOOGLE_SPREADSHEET_ID, usable_tag_col_range).values.flatten
+        urls = ws.map {|row| row[HEADERS.index('url')]}
+        usable_tags = ws.map {|row| row[HEADERS.index('usable_tag')]}
         puts [
           provider_name.ljust(10),
           tag.ljust(15),
@@ -289,39 +272,115 @@ def write_to_google(providers, tags)
         ]
         unless OPTS[:debug]
           if existing_row_i
-            row_range = "#{ws_title}!#{existing_row_i + 1}:#{existing_row_i + 1}"
-            sheets.update_spreadsheet_value(
-              GOOGLE_SPREADSHEET_ID,
-              row_range,
-              Google::Apis::SheetsV4::ValueRange.new(range: row_range, values: [values]),
-              value_input_option: 'USER_ENTERED'
-            )
+            ws[existing_row_i] = values
           else
-            sheets.append_spreadsheet_value(
-              GOOGLE_SPREADSHEET_ID,
-              "#{ws_title}!A1:Z1",
-              Google::Apis::SheetsV4::ValueRange.new(values: [values]),
-              value_input_option: 'USER_ENTERED'
-            )
+            ws << values
           end
         end
       end
     end
-    # ws.save unless OPTS[:debug]
+    ws.save! unless OPTS[:debug]
+  end
+end
+
+# Very simple API wrapper. Some useful references:
+#  https://developers.google.com/sheets/api/samples/writing
+#  https://developers.google.com/sheets/api/guides/values#ruby_2
+#  https://github.com/googleapis/google-api-ruby-client/blob/master/samples/cli/lib/samples/sheets.rb
+class GoogleSheetsApi
+  def client
+    unless @client
+      @client = Google::Apis::SheetsV4::SheetsService.new
+      unless @client.authorization = google_access_token
+        raise "Authentication failure. google_access_token: #{google_access_token}"
+      end
+    end
+    @client
   end
 
-  # 2021-04-28 ok, this all works but you quickly run into google's quoata
-  # limitations b/c you're requesting data from the sheet for *every* single
-  # photo. It's also no robust against token expiry, which it should be if this
-  # is going to run for a while. Sooo, what I need to do is to make yet another
-  # service class that reads the sheet, exposes read and write operations on a
-  # *local* copy of the data, commits changes all in one request, catches
-  # exceptions like Google::Apis::RateLimitError and waits, and catches
-  # Google::Apis::AuthorizationError and fetches a new token
-  # Useful urls:
-  #  https://developers.google.com/sheets/api/samples/writing
-  #  https://developers.google.com/sheets/api/guides/values#ruby_2
-  #  https://github.com/googleapis/google-api-ruby-client/blob/master/samples/cli/lib/samples/sheets.rb
+  def method_missing(method, *args, &block)
+    tries ||= 1
+    client.send(method, *args, &block)
+  rescue Google::Apis::AuthorizationError => e
+    raise e if tries > 3
+    client.authorization = google_access_token
+    sleep tries * tries
+    retry
+  end
+
+  def google_access_token
+    scopes =  [
+      "https://www.googleapis.com/auth/drive",
+      "https://spreadsheets.google.com/feeds/"
+    ]
+    auth = begin
+      Google::Auth.get_application_default(scopes)
+    rescue RuntimeError => e
+      raise e unless e.message =~ /Could not load the default credentials/
+      # Google JSON key was not specified as an ENV variable, so let's try to set it using the options
+      ENV['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS
+      begin
+        Google::Auth.get_application_default(scopes)
+      rescue RuntimeError => e
+        raise e unless e.message =~ /Could not load the default credentials/
+        if ENV['GOOGLE_APPLICATION_CREDENTIALS'].nil?
+          puts <<-EOT
+
+            Could not find Google credentials or they're not working. Set
+            ENV['GOOGLE_APPLICATION_CREDENTIALS'] to the path to your JSON key
+            file, set google_application_credentials to the same in your config
+            YAML, or pass in --google-application-
+            credentials=/path/to/credentials.json
+
+          EOT
+        else
+          puts "Google credentials at #{ENV['GOOGLE_APPLICATION_CREDENTIALS']} don't seem to be working."
+        end
+        exit(0)
+      end
+    end
+    auth.fetch_access_token!
+    auth.access_token
+  end
+end
+
+# Represents a single sheet in a spreadsheet as an array of arrays, so you
+# initialize it with a sheet ID and the position of the individual sheet and
+# access it like you would any array. When you want to commit your changes to
+# Google, use save! This is a pretty naive approach that just reads the entire
+# sheet, makes local changes, then writes the entire thing back again, so it
+# doesn't do a great job with the change history on the sheet. You could imagine
+# a more sophisticated verison that keeps track of which cells were edited and
+# only writes those.
+class GoogleSpreadsheet
+  def initialize(spreadsheet_id, sheet_position)
+    @sheet_id = spreadsheet_id
+    @client = GoogleSheetsApi.new
+    @sheet = @client.get_spreadsheet(@sheet_id).sheets[sheet_position]
+    @title = @sheet.properties.title
+    @values = @client.get_spreadsheet_values(@sheet_id, row_range).values || []
+  end
+
+  def to_s
+    "<GoogleSpreadsheet #{@sheet_id} (#{@title})>"
+  end
+
+  def method_missing(method, *args, &block)
+    @values.send(method, *args, &block)
+  end
+
+  def save!
+    @client.update_spreadsheet_value(
+      @sheet_id,
+      row_range,
+      Google::Apis::SheetsV4::ValueRange.new(range: row_range, values: @values),
+      value_input_option: 'USER_ENTERED'
+    )
+  end
+
+  def row_range
+    "#{@title}!1:999999"
+  end
 end
 
 providers = []
@@ -332,4 +391,3 @@ if GOOGLE_APPLICATION_CREDENTIALS && GOOGLE_SPREADSHEET_ID
 else
   write_to_csv(providers, TAGS)
 end
-
