@@ -2,18 +2,15 @@ require 'rubygems'
 require 'twitter'
 require 'pp'
 require 'active_support/inflector'
-require 'active_support/core_ext/object'
-require 'active_support/json'
 require 'ostruct'
 require 'flickraw'
-require 'instagram'
 require 'csv'
 require 'googleauth'
-require 'google_drive'
-require 'trollop'
+require 'google/apis/sheets_v4'
+require 'optimist'
 require 'yaml'
 
-OPTS = Trollop::options do
+OPTS = Optimist::options do
     banner <<-EOS
 Harvest recent tagged photo metadata from social media services and store the
 data in local CSV files or a Google Spreadsheet. Note that this only harvests
@@ -27,8 +24,11 @@ Since this is pretty configuration-heavy, you can also specify all the API
 keys and secrets in a YAML file specified by the --config option.
 
 Usage:
-  # Save info about Instagram photos for two tags in a local CSV file
-  bundle exec ruby fireslurp.rb --instagram-key=xxx morganfire01 morganfire02
+  # Save info about Twitter photos for two tags in a local CSV file
+  bundle exec ruby fireslurp.rb \
+    --twitter-key=xxx \
+    --twitter-secret=yyy \
+    morganfire01 morganfire02
 
   # Save info about Twitter photos for two tags to a Google Spreadsheet
   bundle exec ruby fireslurp.rb \
@@ -74,7 +74,6 @@ TWITTER_KEY                     = OPTS[:twitter_key]                      || con
 TWITTER_SECRET                  = OPTS[:twitter_secret]                   || config['twitter_secret']
 FLICKR_KEY                      = OPTS[:flickr_key]                       || config['flickr_key']
 FLICKR_SECRET                   = OPTS[:flickr_secret]                    || config['flickr_secret']
-INSTAGRAM_KEY                   = OPTS[:instagram_key]                    || config['instagram_key']
 GOOGLE_APPLICATION_CREDENTIALS  = OPTS[:google_application_credentials]   || config['google_application_credentials']
 GOOGLE_SPREADSHEET_ID           = OPTS[:google_spreadsheet_id]            || config['google_spreadsheet_id']
 AUTO_APPROVE                    = OPTS[:auto_approve]                     || config['auto_approve']
@@ -82,11 +81,11 @@ AUTO_APPROVE                    = OPTS[:auto_approve]                     || con
 
 HEADERS = %w(provider tag datetime username usable_tag image_url url image_url_s image_url_m license title)
 
-Trollop::die "you must specify at least one tag" if ARGV.empty?
-Trollop::die "you must specify at least one API key" if [TWITTER_KEY, FLICKR_KEY, INSTAGRAM_KEY].compact.reject(&:blank?).blank?
+Optimist::die "you must specify at least one tag" if ARGV.empty?
+Optimist::die "you must specify at least one API key" if [TWITTER_KEY, FLICKR_KEY].compact.reject(&:blank?).blank?
 num_google_opts = [GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_SPREADSHEET_ID].compact.reject(&:blank?).size
 if num_google_opts > 0 && num_google_opts < 2
-  Trollop::die "you must specify a Google application credentials and spreadsheet ID if you specify any of those options"
+  Optimist::die "you must specify a Google application credentials and spreadsheet ID if you specify any of those options"
 end
 
 class TwitterProvider
@@ -176,40 +175,6 @@ class FlickrProvider
   end
 end
 
-class InstagramProvider
-  def self.method_missing(method, *args, &block)
-    @@instance ||= self.new
-    @@instance.send(method, *args, &block)
-  end
-
-  def search(q, &block)
-    client.tag_recent_media(q).each do |photo|
-      block.yield(OpenStruct.new(
-        :response => photo,
-        :image_url => photo.images.standard_resolution.url,
-        :image_url_m => photo.images.standard_resolution.url,
-        :image_url_s => photo.images.low_resolution.url,
-        :username => photo.user.username,
-        :url => photo.link,
-        :datetime => Time.at(photo.created_time.to_i),
-        :title => photo.caption ? photo.caption.text : 'Untitled',
-        :license => "all rights reserved"
-      ))
-    end
-  rescue Instagram::BadRequest => e
-    puts "Instagram request failed: #{e.message}"
-    return
-  end
-
-  def client
-    return @client if @client
-    Instagram.configure do |config|
-      config.client_id = INSTAGRAM_KEY
-    end
-    @client = Instagram
-  end
-end
-
 def write_to_csv(providers, tags)
   now = Time.now
   path = "fireslurp-#{now.strftime('%Y-%m-%d')}-#{now.to_i}.csv"
@@ -266,30 +231,19 @@ def google_access_token
 end
 
 def write_to_google(providers, tags)
-  session = begin
-    GoogleDrive.login_with_oauth(google_access_token)
-  rescue Faraday::SSLError
-    # Sometimes Faraday barfs if it can't find its certs. This will force it to do so in OS X, at least.
-    # https://github.com/google/google-api-ruby-client/issues/253#issuecomment-128747637
-    cert_path = Gem.loaded_specs['google-api-client'].full_gem_path+'/lib/cacerts.pem'
-    ENV['SSL_CERT_FILE'] = cert_path
-    GoogleDrive.login_with_oauth(google_access_token)
+  ws = GoogleSpreadsheet.new(GOOGLE_SPREADSHEET_ID, 0)
+  header = ws[0]
+  if !header || header[0].blank? || header.size == 0
+    ws[0] = HEADERS
   end
-
-  ws = session.spreadsheet_by_key(GOOGLE_SPREADSHEET_ID).worksheets[0]
-  if ws.rows[0].nil? || ws.rows[0].size == 0
-    HEADERS.each_with_index do |header,i|
-      ws[1,i+1] = header
-    end
-    ws.save unless OPTS[:debug]
-  end
-  urls = ws.rows.map{|r| r[HEADERS.index('url')]}
   providers.each do |provider|
     provider_name = provider.name.underscore.split('_').first.capitalize
     puts
     tags.each do |tag|
       provider.search(tag) do |photo|
         next unless photo
+        urls = ws.map {|row| row[HEADERS.index('url')]}
+        usable_tags = ws.map {|row| row[HEADERS.index('usable_tag')]}
         puts [
           provider_name.ljust(10),
           tag.ljust(15),
@@ -298,11 +252,12 @@ def write_to_google(providers, tags)
           photo.image_url.to_s.ljust(70),
           photo.url.to_s.ljust(70)
         ].join
-        row = (urls.index(photo.url.to_s) || ws.num_rows) + 1
-        existing_usable_tag = ws[row,HEADERS.index('usable_tag')+1]
-        usable_tag = existing_usable_tag
-        usable_tag = tag if AUTO_APPROVE && existing_usable_tag.blank?
-        [
+        usable_tag = tag if AUTO_APPROVE
+        if existing_row_i = urls.index(photo.url.to_s)
+          existing_usable_tag = usable_tags[existing_row_i]
+          usable_tag = existing_usable_tag unless existing_usable_tag.blank?
+        end
+        values = [
           provider_name, 
           tag, 
           photo.datetime.iso8601, 
@@ -314,19 +269,123 @@ def write_to_google(providers, tags)
           photo.image_url_m,
           photo.license,
           photo.title,
-        ].each_with_index do |value,i|
-          ws[row,i+1] = value
+        ]
+        unless OPTS[:debug]
+          if existing_row_i
+            ws[existing_row_i] = values
+          else
+            ws << values
+          end
         end
       end
     end
-    ws.save unless OPTS[:debug]
+    ws.save! unless OPTS[:debug]
+  end
+end
+
+# Very simple API wrapper. Some useful references:
+#  https://developers.google.com/sheets/api/samples/writing
+#  https://developers.google.com/sheets/api/guides/values#ruby_2
+#  https://github.com/googleapis/google-api-ruby-client/blob/master/samples/cli/lib/samples/sheets.rb
+class GoogleSheetsApi
+  def client
+    unless @client
+      @client = Google::Apis::SheetsV4::SheetsService.new
+      unless @client.authorization = google_access_token
+        raise "Authentication failure. google_access_token: #{google_access_token}"
+      end
+    end
+    @client
+  end
+
+  def method_missing(method, *args, &block)
+    tries ||= 1
+    client.send(method, *args, &block)
+  rescue Google::Apis::AuthorizationError => e
+    raise e if tries > 3
+    client.authorization = google_access_token
+    sleep tries * tries
+    retry
+  end
+
+  def google_access_token
+    scopes =  [
+      "https://www.googleapis.com/auth/drive",
+      "https://spreadsheets.google.com/feeds/"
+    ]
+    auth = begin
+      Google::Auth.get_application_default(scopes)
+    rescue RuntimeError => e
+      raise e unless e.message =~ /Could not load the default credentials/
+      # Google JSON key was not specified as an ENV variable, so let's try to set it using the options
+      ENV['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS
+      begin
+        Google::Auth.get_application_default(scopes)
+      rescue RuntimeError => e
+        raise e unless e.message =~ /Could not load the default credentials/
+        if ENV['GOOGLE_APPLICATION_CREDENTIALS'].nil?
+          puts <<-EOT
+
+            Could not find Google credentials or they're not working. Set
+            ENV['GOOGLE_APPLICATION_CREDENTIALS'] to the path to your JSON key
+            file, set google_application_credentials to the same in your config
+            YAML, or pass in --google-application-
+            credentials=/path/to/credentials.json
+
+          EOT
+        else
+          puts "Google credentials at #{ENV['GOOGLE_APPLICATION_CREDENTIALS']} don't seem to be working."
+        end
+        exit(0)
+      end
+    end
+    auth.fetch_access_token!
+    auth.access_token
+  end
+end
+
+# Represents a single sheet in a spreadsheet as an array of arrays, so you
+# initialize it with a sheet ID and the position of the individual sheet and
+# access it like you would any array. When you want to commit your changes to
+# Google, use save! This is a pretty naive approach that just reads the entire
+# sheet, makes local changes, then writes the entire thing back again, so it
+# doesn't do a great job with the change history on the sheet. You could imagine
+# a more sophisticated verison that keeps track of which cells were edited and
+# only writes those.
+class GoogleSpreadsheet
+  def initialize(spreadsheet_id, sheet_position)
+    @sheet_id = spreadsheet_id
+    @client = GoogleSheetsApi.new
+    @sheet = @client.get_spreadsheet(@sheet_id).sheets[sheet_position]
+    @title = @sheet.properties.title
+    @values = @client.get_spreadsheet_values(@sheet_id, row_range).values || []
+  end
+
+  def to_s
+    "<GoogleSpreadsheet #{@sheet_id} (#{@title})>"
+  end
+
+  def method_missing(method, *args, &block)
+    @values.send(method, *args, &block)
+  end
+
+  def save!
+    @client.update_spreadsheet_value(
+      @sheet_id,
+      row_range,
+      Google::Apis::SheetsV4::ValueRange.new(range: row_range, values: @values),
+      value_input_option: 'USER_ENTERED'
+    )
+  end
+
+  def row_range
+    "#{@title}!1:999999"
   end
 end
 
 providers = []
 providers << TwitterProvider if TWITTER_KEY
 providers << FlickrProvider if FLICKR_KEY
-providers << InstagramProvider if INSTAGRAM_KEY
 if GOOGLE_APPLICATION_CREDENTIALS && GOOGLE_SPREADSHEET_ID
   write_to_google(providers, TAGS)
 else
